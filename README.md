@@ -1,4 +1,4 @@
-# dandelion_extension
+# sc-dandelion-extension
 
 Scripts for running [sc-dandelion](https://github.com/zktuong/dandelion) BCR/TCR
 preprocessing and contig QC inside the official dandelion Singularity/Apptainer container.
@@ -6,7 +6,9 @@ preprocessing and contig QC inside the official dandelion Singularity/Apptainer 
 | Script | What it does |
 |---|---|
 | `dandelion_preprocess.py` | A modified version of the container's own `/share/dandelion_preprocess.py` (format contigs, re-annotate with IgBLAST, TIgGER allele reassignment, isotype assignment, mutation counts). See [Changes from upstream](#changes-from-upstream). |
+| `dandelion_preprocess_v0.3.2.py` | The same script adapted to the dandelion 0.3.2 API (see [Tested containers](#tested-containers)). |
 | `dandelion_qc.py` | A new step. It merges the per-sample results, filters contigs, quantifies mutations per locus, calls clonotypes and writes AIRR / h5ddl / metadata outputs. |
+| `add_custom_germlines.py` | Adds custom (e.g. transgenic) V/D/J genes to a copy of the reference database. See [Adding custom germline genes](#adding-custom-germline-genes-eg-swhel-hyhel10). |
 
 This repo holds **code only**. It has no container images and no cluster-specific settings.
 
@@ -57,7 +59,7 @@ This repo holds **code only**. It has no container images and no cluster-specifi
 ## Install
 
 ```bash
-git clone https://github.com/hungms/dandelion_extension.git
+git clone https://github.com/hungms/sc-dandelion-extension.git
 ```
 
 ## Input layout
@@ -109,7 +111,7 @@ Passed with `--meta` to QC. One row per cell, with a header row.
 | SAMPLE_2_AAACCTGCAAGCCGCT-1 | SAMPLE_2 |
 
 ```csv
-"","project"
+"barcode","project"
 "SAMPLE_1_AAACCTGAGATGTTAG-1","SAMPLE_1"
 "SAMPLE_1_AAACCTGAGTCCGGTC-1","SAMPLE_1"
 "SAMPLE_2_AAACCTGCAAGCCGCT-1","SAMPLE_2"
@@ -126,7 +128,7 @@ Passed with `--meta` to QC. One row per cell, with a header row.
 ## Usage
 
 ```bash
-CODE=/path/to/dandelion_extension
+CODE=/path/to/sc-dandelion-extension
 SIF=/path/to/sc-dandelion_latest.sif
 cd /path/to/work_dir
 
@@ -208,7 +210,7 @@ repo. A minimal Slurm example:
 set -euo pipefail
 module load singularity        # or apptainer: use whatever your site provides
 
-CODE=/path/to/dandelion_extension
+CODE=/path/to/sc-dandelion-extension
 SIF=/path/to/sc-dandelion_latest.sif
 cd /path/to/work_dir
 
@@ -253,6 +255,72 @@ dandelion:
 > Suo C, Polanski K, Dann E, et al. Dandelion uses the single-cell adaptive immune receptor
 > repertoire to explore lymphocyte developmental origins. *Nature Biotechnology* 42, 40–51 (2024).
 
+## Adding custom germline genes (e.g. SWHEL HyHEL10)
+
+Transgenic or knock-in mice carry V(D)J genes that are not in IMGT. If those genes are missing,
+the contigs are called against the closest endogenous gene, and every difference from it looks
+like somatic hypermutation. `add_custom_germlines.py` adds the genes to a **copy** of the
+container's reference database. You then bind that copy over `/share/database` at run time.
+The container image itself is never changed.
+
+The container keeps each gene in three places, and all three have to be updated together:
+
+| Path inside `/share/database` | Contents | Read by |
+|---|---|---|
+| `germlines/imgt/<org>/vdj/imgt_<org>_IGHV.fasta` etc. | IMGT-gapped sequences (the source) | MakeDb, `create_germlines`, TIgGER, mutation counting |
+| `igblast/fasta/imgt_<org>_ig_v.fasta` etc. | Ungapped copies | `makeblastdb` |
+| `igblast/database/imgt_<org>_ig_v.n*` etc. | BLAST databases | IgBLAST, blastn D/J re-alignment |
+
+Editing only `igblast/fasta/` has no effect, because IgBLAST searches the BLAST databases built
+from it. `add_custom_germlines.py` updates all three.
+
+**1. Write the new genes as ungapped FASTA.** For SWHEL, this is the HyHEL10 heavy-chain knock-in
+(`swhel_hyhel10.fasta`):
+
+```
+>IGHV0-HyHel10*01 template=IGHV3-8*02
+GACGTGCAGCTTCAGGAGTCAGGACCTAGCCTCGTGAAACCTTCTCAGACTCTGTCCCTCACCTGTTCTGTCACTGGCGACTCCATCACCAGTGATTATTGGAGCTGGATCCGGAAATTCCCAGGGAATAGACTTGAGTACATGGGGTACGTAAGCTACAGTGGTAGCACGTACTACAATCCATCTCTCAAAAGTCGAATCTCCATCACTCGAGACACATCCAAGAATCAGTACTATCTGGACCTGAATTCTGTGACTACTGAGGACACAGCCACATATTACTGTGCA
+>IGHD0-HyHel10*01
+AACTGGGACGGTGATTAC
+```
+
+- **Names** must follow the IMGT pattern `IG[HKL]` + `V/D/J` + family number + `-name*allele`,
+  because Change-O and TIgGER read gene calls with that pattern. For example `IGHV0-HyHel10*01`
+  works, but `HyHel10*01` or `IGHV-HyHel10*01` would lose their gene call. Family `0` marks the
+  gene as custom.
+- **V genes need `template=`**: the closest germline allele. The script copies that allele's
+  IMGT gap pattern, which works as long as the new V has no insertions or deletions relative to
+  it. It stops if identity is below 85%; in that case, gap the sequence with
+  [IMGT/V-QUEST](https://www.imgt.org/IMGT_vquest/) instead.
+- **Only add what isn't germline.** In SWHEL, the J region is an exact match to germline
+  IGHJ3\*01 and the kappa chain is germline, so neither is added. The V ends at the codon after
+  the second cysteine (`…TATTACTGTGCA`). The D covers the rest of the knock-in CDR3
+  (IGHD4-1-like sequence plus N-additions), so the whole junction counts as germline.
+
+**2. Build the custom database** (about 2 minutes):
+
+```bash
+SIF=/path/to/sc-dandelion_latest_v0.5.4.sif
+CODE=/path/to/sc-dandelion-extension
+DB=$PWD/database_v0.5.4_swhel
+
+singularity exec -B "$PWD" "$SIF" cp -r /share/database "$DB"
+singularity exec -B "$PWD,$CODE" "$SIF" python "$CODE/add_custom_germlines.py" \
+    "$DB" swhel_hyhel10.fasta --org mouse
+```
+
+Running it again skips genes that are already present.
+
+**3. Use it** by adding `$DB:/share/database` to `-B` on every `singularity run`:
+
+```bash
+singularity run -B "$PWD,$CODE,$DB:/share/database" "$SIF" python "$CODE/dandelion_preprocess.py" \
+    --org mouse --chain IG --db imgt --file_prefix filtered --meta sample.csv
+```
+
+`dandelion_qc.py` reads the germlines stored in the preprocess output, so it doesn't need the
+custom database. Bind it anyway to keep the two steps consistent.
+
 ## Tested containers
 
 | Container file | dandelion | Python | Image pulled | Preprocess script |
@@ -260,14 +328,15 @@ dandelion:
 | `sc-dandelion_latest_v0.3.2.sif` | 0.3.2 | 3.9.16 | 2023-11-14 | `dandelion_preprocess_v0.3.2.py` |
 | `sc-dandelion_latest_v0.3.7.sif` | 0.3.7 | 3.11.9 | 2024-06-18 | `dandelion_preprocess.py` |
 | `sc-dandelion_latest_v0.5.4.sif` | 0.5.4 | 3.12.9 | 2026-03-06 | `dandelion_preprocess.py` |
-| `sc-dandelion_latest_v0.5.4_swhel.sif` | 0.5.4 | 3.12.9 | 2026-03-12 | `dandelion_preprocess.py` |
 
 `dandelion_qc.py` is the same for all versions. It uses `ddl.pp.filter_contigs`, which is
 deprecated in 0.5.x and scheduled for removal in 0.6.0.
 
 `dandelion_preprocess_v0.3.2.py` is needed for 0.3.2 because that version has no OGRDB support
 (so it takes only `--db imgt` and no `--strain`), and its `create_germlines` has a different
-signature. `_swhel` is a local setup for SWHEL transgenic mice. Its modified mouse IgBLAST V/D
-reference FASTAs live in the unpacked sandbox folder `sc-dandelion_latest_v0.5.4_swhel/`. The `.sif`
-file with the same name is identical to the stock 0.5.4 image.
-# sc-dandelion-extension
+signature.
+
+For SWHEL mice, use the stock 0.5.4 image with a custom database (see
+[Adding custom germline genes](#adding-custom-germline-genes-eg-swhel-hyhel10)). An earlier
+`sc-dandelion_latest_v0.5.4_swhel` setup edited only `igblast/fasta/` inside an unpacked
+container and had no effect. Its `.sif` is identical to the stock image.
