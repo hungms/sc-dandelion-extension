@@ -1,0 +1,11 @@
+# Container images and unpacked sandboxes (multi-GB; obtain separately, see README)
+containers/
+*.sif
+
+# Site/HPC-specific wrappers and run configs belong outside this repo
+*.sh
+
+# OS / editor
+.DS_Store
+__pycache__/
+*.pyc
