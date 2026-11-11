@@ -41,13 +41,18 @@ This repo holds **code only**. It has no container images and no cluster-specifi
 ## Requirements
 
 - Singularity ≥ 3.x or Apptainer
-- The sc-dandelion container. Tested with **sc-dandelion 0.5.4** (image pulled 2026-03-06):
+- The sc-dandelion container. Download it, then rename the file after the dandelion version it
+  contains:
   ```bash
   singularity pull library://kt16/default/sc-dandelion:latest   # -> sc-dandelion_latest.sif
+  singularity exec sc-dandelion_latest.sif python -c "import dandelion; print(dandelion.__version__)"
+  mv sc-dandelion_latest.sif sc-dandelion_latest_v<version>.sif
   ```
   `latest` changes over time. Keep the `.sif` you used for a project so results stay reproducible.
 - Cell Ranger VDJ outputs: `filtered_contig.fasta` + `filtered_contig_annotations.csv`
   (or the `all_` equivalents) for each sample.
+- See [Tested containers](#tested-containers) for which preprocess script goes with which
+  container version.
 
 ## Install
 
@@ -70,15 +75,53 @@ work_dir/
     └── ...
 ```
 
-**`sample.csv`** (passed with `--meta` to preprocess): has a header row. The first column is
-the sample ID, which must match the folder name. Optional columns:
-- `prefix` / `suffix`: text added to barcodes
-- `individual`: groups samples for TIgGER (otherwise all samples are analysed together)
+### `sample.csv`
 
-**`cell.csv`** (passed with `--meta` to QC): has a header row, and the first column (index) is the
-cell barcode, written the same way as in the preprocessed output (e.g. `SAMPLE_1_AAAC...`). It
-**must have a `project` column** whose values are the sample folder names. These values tell
-the script which `SAMPLE/dandelion/<prefix>_contig_dandelion.tsv` files to read.
+Passed with `--meta` to preprocess. One row per sample, with a header row.
+
+| sample | prefix | individual |
+|---|---|---|
+| SAMPLE_1 | SAMPLE_1 | mouse_1 |
+| SAMPLE_2 | SAMPLE_2 | mouse_1 |
+| SAMPLE_3 | SAMPLE_3 | mouse_2 |
+
+```csv
+sample,prefix,individual
+SAMPLE_1,SAMPLE_1,mouse_1
+SAMPLE_2,SAMPLE_2,mouse_1
+SAMPLE_3,SAMPLE_3,mouse_2
+```
+
+- **First column (required):** the sample ID. It must match the sample folder name.
+- `prefix` or `suffix` (optional): text added to each barcode, joined with `--sep`
+  (default `_`). Use one or the other, not both.
+- `individual` (optional): groups samples from the same animal or donor for TIgGER. Without
+  this column, all samples are genotyped together.
+
+### `cell.csv`
+
+Passed with `--meta` to QC. One row per cell, with a header row.
+
+| *(index: cell barcode)* | project |
+|---|---|
+| SAMPLE_1_AAACCTGAGATGTTAG-1 | SAMPLE_1 |
+| SAMPLE_1_AAACCTGAGTCCGGTC-1 | SAMPLE_1 |
+| SAMPLE_2_AAACCTGCAAGCCGCT-1 | SAMPLE_2 |
+
+```csv
+"","project"
+"SAMPLE_1_AAACCTGAGATGTTAG-1","SAMPLE_1"
+"SAMPLE_1_AAACCTGAGTCCGGTC-1","SAMPLE_1"
+"SAMPLE_2_AAACCTGCAAGCCGCT-1","SAMPLE_2"
+```
+
+- **First column (index):** the cell barcode, written exactly as it appears in the
+  preprocessed output: `<prefix><sep><barcode>`. The trailing `-1` is kept only if preprocess
+  ran with `--keep_trailing_hyphen_number`. The header for this column can be blank (as in an
+  `obs.to_csv()` export from AnnData).
+- **`project` (required):** the sample folder name for each cell. It tells QC which
+  `SAMPLE/dandelion/<prefix>_contig_dandelion.tsv` files to read.
+- Extra columns are allowed. They're ignored.
 
 ## Usage
 
@@ -185,17 +228,18 @@ To run a fixed version for a production analysis, check out a tag in the clone
 
 ## Changes from upstream
 
-Compared with `/share/dandelion_preprocess.py` in the sc-dandelion 0.5.4 container:
+`dandelion_preprocess.py` is based on `/share/dandelion_preprocess.py` from the
+**sc-dandelion 0.3.7** container (image pulled 2024-06-18). The only functional change is:
 
-- `filename_prefix` is passed to every dandelion function as a per-sample list instead of a
-  single string.
 - **C-call correction is disabled** (`correct_c_call=False` at `assign_isotypes`) whatever
-  `--skip_correct_c` is set to. A mouse IGHG2A/B/C correction dictionary is defined but not used.
-- Sample names come straight from the metadata index, without converting them to strings.
-- This script was based on an earlier upstream version, so it does **not** include upstream's
-  later safety check that stops `--clean_output` from deleting sample folders when an
-  `individual` value has the same name as a sample. Avoid using `--clean_output` with
-  overlapping names.
+  `--skip_correct_c` is set to, so the mouse IGHG2A/B/C correction dictionary is not used.
+
+The script runs unchanged in the 0.3.7 and 0.5.4 containers, because every dandelion function
+it calls takes the same arguments in both versions. The 0.5.4 container ships a newer
+`/share/dandelion_preprocess.py` that this repo has **not** picked up. That newer script
+converts sample names to strings and adds a safety check so that `--clean_output` cannot delete
+sample folders when an `individual` value has the same name as a sample. Avoid
+`--clean_output` with overlapping names.
 
 `dandelion_qc.py` is new and has no upstream counterpart.
 
@@ -208,3 +252,22 @@ dandelion:
 
 > Suo C, Polanski K, Dann E, et al. Dandelion uses the single-cell adaptive immune receptor
 > repertoire to explore lymphocyte developmental origins. *Nature Biotechnology* 42, 40–51 (2024).
+
+## Tested containers
+
+| Container file | dandelion | Python | Image pulled | Preprocess script |
+|---|---|---|---|---|
+| `sc-dandelion_latest_v0.3.2.sif` | 0.3.2 | 3.9.16 | 2023-11-14 | `dandelion_preprocess_v0.3.2.py` |
+| `sc-dandelion_latest_v0.3.7.sif` | 0.3.7 | 3.11.9 | 2024-06-18 | `dandelion_preprocess.py` |
+| `sc-dandelion_latest_v0.5.4.sif` | 0.5.4 | 3.12.9 | 2026-03-06 | `dandelion_preprocess.py` |
+| `sc-dandelion_latest_v0.5.4_swhel.sif` | 0.5.4 | 3.12.9 | 2026-03-12 | `dandelion_preprocess.py` |
+
+`dandelion_qc.py` is the same for all versions. It uses `ddl.pp.filter_contigs`, which is
+deprecated in 0.5.x and scheduled for removal in 0.6.0.
+
+`dandelion_preprocess_v0.3.2.py` is needed for 0.3.2 because that version has no OGRDB support
+(so it takes only `--db imgt` and no `--strain`), and its `create_germlines` has a different
+signature. `_swhel` is a local setup for SWHEL transgenic mice. Its modified mouse IgBLAST V/D
+reference FASTAs live in the unpacked sandbox folder `sc-dandelion_latest_v0.5.4_swhel/`. The `.sif`
+file with the same name is identical to the stock 0.5.4 image.
+# sc-dandelion-extension
