@@ -71,6 +71,42 @@ def parse_args():
     return args
 
 
+VDJ_LOCI = ["IGH", "TRB", "TRD"]  # every other locus (IGK, IGL, TRA, TRG) is VJ
+
+
+def add_mutation_summary(vdj, cols=("mu_count", "mu_freq")):
+    """Write per-cell mutation columns into vdj.metadata from the contig-level values.
+
+    For each of mu_count and mu_freq, summed over a cell's contigs (matched by cell_id):
+      <col>_VDJ    heavy chain (IGH) contigs
+      <col>_VJ     light chain (IGK + IGL) contigs
+      <col>        total, = <col>_VDJ + <col>_VJ
+      <col>_<locus> per locus (IGH, IGK, IGL)
+    Replaces what update_metadata() puts in these columns, which differs between
+    dandelion versions (0.3.2 averages the VJ values of a cell with two light chains,
+    0.5.4 sums them). Contigs flagged ambiguous are skipped, as in
+    quantify_mutations. A cell with no contig of a chain type gets NaN for it.
+    Call after the last update_metadata() so nothing overwrites these columns.
+    """
+    cols = list(cols)
+    dat = vdj.data[["cell_id", "locus"] + cols].copy()
+    if "ambiguous" in vdj.data:
+        dat = dat[vdj.data["ambiguous"] == "F"]
+    for c in cols:
+        dat[c] = pd.to_numeric(dat[c], errors="coerce")
+    dat["chain"] = np.where(dat["locus"].isin(VDJ_LOCI), "VDJ", "VJ")
+    cells = vdj.metadata.index
+
+    for key, groups in (("chain", ["VDJ", "VJ"]), ("locus", sorted(dat["locus"].unique()))):
+        sums = dat.groupby(["cell_id", key])[cols].sum(min_count=1).unstack(key)
+        for c in cols:
+            for g in groups:
+                vals = sums[(c, g)] if (c, g) in sums.columns else pd.Series(dtype=float)
+                vdj.metadata[f"{c}_{g}"] = vals.reindex(cells)
+    for c in cols:
+        vdj.metadata[c] = vdj.metadata[[f"{c}_VDJ", f"{c}_VJ"]].sum(axis=1, min_count=1)
+
+
 def main():
     """Filter Contigs & Clonotype Process."""
     logg.info("Software versions:\n")
@@ -129,6 +165,23 @@ def main():
             if args.skip_correct_c:
                 vdj.data["c_call"] = vdj.data["c_call_10x"]
                 vdj.update_metadata()
+            # transfer() matches cells by barcode and silently gives No_contig when
+            # none match, so check the --meta barcodes against this sample's VDJ cells
+            n_vdj = vdj.metadata.shape[0]
+            n_hit = int(vdj.metadata.index.isin(adatas[i].obs_names).sum())
+            logg.info(f"{column[i]}: {n_hit}/{n_vdj} VDJ cells found in --meta\n")
+            if n_hit == 0:
+                raise ValueError(
+                    f"project '{column[i]}': none of the {n_vdj} VDJ cell barcodes in "
+                    f"{samples[i]} are in --meta (e.g. VDJ '{vdj.metadata.index[0]}' vs "
+                    f"meta '{adatas[i].obs_names[0]}'). Check the barcode prefix/sep and "
+                    "the trailing -1 (--keep_trailing_hyphen_number in preprocess)."
+                )
+            if n_hit < 0.5 * n_vdj:
+                logg.warning(
+                    f"project '{column[i]}': only {n_hit}/{n_vdj} VDJ cells are in "
+                    "--meta; check the barcode format if this is unexpected.\n"
+                )
             ddl.tl.transfer(adatas[i], vdj)
             vdjs.append(vdj)
 
@@ -151,9 +204,15 @@ def main():
     )
 
     # Step5 : quantify mutations per locus
+    # Not ddl.pp.quantify_mutations(split_locus=True): it writes the IGH results and then
+    # the IGK/IGL results back by row position instead of by sequence_id, so when heavy
+    # and light contigs are interleaved (as in 10x data) values land on the wrong
+    # contigs and cells (dandelion 0.3.2 and 0.5.4). Count per contig without
+    # split_locus, which keeps the row order (-> mu_count / mu_freq in the AIRR table);
+    # the per-cell sums are added in Step7 by add_mutation_summary().
     if args.chain == "ig":
-        ddl.pp.quantify_mutations(vdjs,split_locus=True,)
-        ddl.pp.quantify_mutations(vdjs,frequency=True, split_locus=True,)
+        ddl.pp.quantify_mutations(vdjs)
+        ddl.pp.quantify_mutations(vdjs, frequency=True)
 
     # Step6 : find clones
     if not args.skip_find_clones:
@@ -163,7 +222,13 @@ def main():
     # Step7 : save in airr format & save metadata
     vdjs.update_plus()
     vdjs.update_metadata()
-    ddl.tl.transfer(adatas, vdjs)
+    if args.chain == "ig":
+        # per-cell mu_count/mu_freq (total), _VDJ, _VJ and per locus; after the last
+        # update_metadata() so they are not overwritten
+        add_mutation_summary(vdjs)
+    # overwrite=True: adatas.obs already holds these columns from filter_contigs (Step4),
+    # and without it transfer() keeps those older values (e.g. the mutation summaries)
+    ddl.tl.transfer(adatas, vdjs, overwrite=True)
 
     #contig_pass_meta = adatas.obs[adatas.obs['filter_contig'] == False]
     #contig_pass_meta.to_csv("contig_qc/dandelion_meta.csv")
